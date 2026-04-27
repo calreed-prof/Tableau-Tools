@@ -1,39 +1,21 @@
 # Tableau Tools
 
-> Edit Tableau workbook SQL without ever opening Tableau Desktop.
+> A small toolkit for working with Tableau workbooks (`.twb` / `.twbx`) without ever opening Tableau Desktop.
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#)
 
-A small toolkit for power users who'd rather work in their terminal than wait for Tableau Desktop to load. Operates directly on `.twb` / `.twbx` files — no Tableau Server, no Tableau Desktop license required for the script itself.
+Operates directly on `.twb` / `.twbx` files — no Tableau Server, no Tableau Desktop license required for the scripts themselves.
 
 ---
 
-## Why?
+## Tools
 
-Updating Initial SQL or Custom SQL in a Tableau workbook normally means:
-
-1. Open Tableau Desktop (slow).
-2. Find the data source.
-3. Drill into the connection.
-4. Edit SQL in a tiny modal with no syntax highlighting.
-5. Save and pray.
-
-For a workbook with a dozen data sources, this gets old fast — especially when you're refactoring schema names or doing find-and-replace style edits across an entire dashboard.
-
-**Tableau Tools** lets you list every SQL block in a workbook and edit each one in your editor of choice (VS Code, vim, Sublime, Notepad — whatever `$EDITOR` points at). Changes are written back to the `.twb` / `.twbx`, with a `.bak` safety copy created automatically.
-
----
-
-## Features
-
-- Lists every **Initial SQL** and **Custom SQL** block across all datasources in a workbook
-- Opens each block in your `$EDITOR` (falls back to Notepad on Windows, nano on \*nix)
-- Works on both `.twb` (raw XML) and `.twbx` (zipped) workbooks — non-XML assets pass through untouched
-- Deduplicates SQL repeated across multiple connection nodes (common in extracts) and updates all instances on save
-- Always writes a `.bak` backup before modifying the workbook
-- Pure Python — no Tableau Server / Tableau Desktop runtime dependency
+| Tool                  | What it does                                                       |
+|-----------------------|--------------------------------------------------------------------|
+| **SQL editor**        | List and edit every Initial SQL / Custom SQL block in a workbook   |
+| **Calculated fields** | Extract every calculated field (name + formula) to stdout or CSV   |
 
 ---
 
@@ -45,17 +27,47 @@ cd Tableau-Tools
 pip install -r requirements.txt
 ```
 
-Requires **Python 3.10+**.
+Requires **Python 3.10+**. Dependencies: `lxml`, `rich`, `questionary`. The launcher also uses **tkinter** (stdlib) for the file picker — bundled with Windows/macOS Python; on Linux install `python3-tk` if you don't already have it.
 
 ---
 
 ## Usage
 
+### Interactive launcher (recommended)
+
 ```bash
-python tableau_sql_editor.py path/to/Dashboard.twb
-# or a packaged workbook
-python tableau_sql_editor.py path/to/Dashboard.twbx
+python -m tableau_tools
 ```
+
+```text
+╭─ Tableau Tools ─────────────────────────╮
+│ Edit and inspect Tableau workbooks      │
+╰─────────────────────────────────────────╯
+
+? Choose a tool: (Use arrow keys)
+ ❯ Edit SQL           — Initial / Custom SQL
+   List calc fields   — name + formula
+   Quit
+```
+
+Arrow keys to pick a tool, then a native file picker opens to select the workbook (filtered to `.twb` / `.twbx`).
+
+### Direct invocation
+
+Each tool can also be run directly:
+
+```bash
+python -m tableau_tools.sql_editor path/to/Dashboard.twbx
+python -m tableau_tools.calculated_fields path/to/Dashboard.twbx
+python -m tableau_tools.calculated_fields path/to/Dashboard.twbx --format csv
+python -m tableau_tools.calculated_fields path/to/Dashboard.twbx --format csv --output calcs.csv
+```
+
+---
+
+## SQL editor
+
+Lists every Initial SQL and Custom SQL block in the workbook and lets you edit each one in your editor of choice (`$EDITOR` / `$VISUAL`, falling back to Notepad on Windows or nano elsewhere).
 
 ### Sample session
 
@@ -117,12 +129,64 @@ On Windows without `$EDITOR` set, the script falls back to Notepad.
 
 ---
 
+## Calculated fields
+
+Read-only. Walks every `<datasource>` and emits one row per calculated field — display name, datasource, and formula. Parameters (which also use the `<calculation>` element) are included but flagged.
+
+### Stdout
+
+```bash
+python -m tableau_tools.calculated_fields Sales_Dashboard.twbx
+```
+
+```text
+  Found 12 calculated field(s):
+
+  ------------------------------------------------------------
+  #1  Profit Ratio  |  Snowflake - Prod
+  ------------------------------------------------------------
+  SUM([Profit]) / SUM([Sales])
+
+  ------------------------------------------------------------
+  #2  Region Bucket  |  Snowflake - Prod
+  ------------------------------------------------------------
+  IF [Sales] > 100000 THEN "High" ELSE "Low" END
+  ...
+```
+
+### CSV
+
+```bash
+python -m tableau_tools.calculated_fields Sales_Dashboard.twbx --format csv
+# → Sales_Dashboard.twbx.calcs.csv
+```
+
+Columns: `name, internal_name, datasource, is_parameter, formula`.
+
+---
+
 ## How it works
 
 - `.twbx` files are unzipped in memory; the inner `.twb` is parsed with `lxml`.
-- Each `<datasource>` is walked for `<connection>` initial-SQL attributes, `<initial_sql>` elements, and `<relation type="text">` nodes (Custom SQL).
-- Entries are deduplicated using a stable XPath-style tree-path key — so SQL that appears in multiple connection nodes shows up once in the index but is updated in every location on save.
-- On save, the `.twbx` is repacked with the modified `.twb` plus every original asset (extracts, images, thumbnails) byte-for-byte intact.
+- Mutating tools (SQL editor) hold every other zip member as raw bytes and repack the archive byte-for-byte intact on save (extracts, images, thumbnails are never touched).
+- Each `<datasource>` is walked for the relevant XML structures — `<connection>` initial-SQL attributes / `<initial_sql>` / `<relation type="text">` for the SQL editor; `<column> / <calculation class="tableau">` for calculated fields.
+- The SQL editor deduplicates entries by `(kind, datasource, sql_text)` so SQL repeated across multiple connection nodes shows up once in the index but is updated in every location on save.
+- Mutating tools always write a `.bak` copy before modifying the workbook.
+
+---
+
+## Project layout
+
+```
+tableau_tools/
+├── __init__.py
+├── __main__.py            # interactive launcher
+├── common.py              # workbook load/save/backup
+├── sql_editor.py
+└── calculated_fields.py
+```
+
+Each tool exposes both a `run(...)` function (used by the launcher) and a `main()` (argv parsing for `python -m tableau_tools.<tool>`).
 
 ---
 

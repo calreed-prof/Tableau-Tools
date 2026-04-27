@@ -1,81 +1,28 @@
-#!/usr/bin/env python3
-"""
-tableau_sql_editor.py
----------------------
-Edit Initial SQL and Custom SQL in a Tableau workbook (.twb / .twbx)
-WITHOUT loading it in Tableau.
-
-Author: Caleb
+"""Edit Initial SQL and Custom SQL in a Tableau workbook (.twb / .twbx).
 
 Usage:
-    python tableau_sql_editor.py <path/to/workbook.twb>
-    python tableau_sql_editor.py <path/to/workbook.twbx>
+    python -m tableau_tools.sql_editor <path/to/workbook.twb|.twbx>
 
 Commands inside the tool:
     list          Re-print the SQL index table
     show <#>      Print the FULL SQL for entry # directly in the terminal
     <#>           Open entry # in your editor ($EDITOR / Notepad / nano)
     q             Quit (saves if any edits were made)
-
-Features:
-  - Deduplicates by stable tree-path key (not Python object id)
-  - Works on both .twb (XML) and .twbx (ZIP containing .twb)
-  - Opens selected SQL in $EDITOR (set EDITOR=code --wait for VS Code)
-  - Writes changes back; always creates a .bak backup first
-
-Testing
 """
 
+from __future__ import annotations
+
 import os
-import sys
-import shutil
-import zipfile
-import tempfile
 import platform
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
+
 from lxml import etree
 
+from .common import backup, load_workbook, save_workbook, validate_workbook_path
 
-# ---------------------------------------------------------------------------
-# Stable node key — XPath-style ancestor path
-# ---------------------------------------------------------------------------
-
-def node_key(node: etree._Element, attr: str | None) -> str:
-    """
-    Build a stable string key from the node's position in the tree.
-    Uses the tag and sibling-index of every ancestor so it never changes
-    between iterations (unlike id() which depends on Python object identity).
-    """
-    parts = []
-    el = node
-    while el is not None:
-        parent = el.getparent()
-        if parent is not None:
-            siblings = [c for c in parent if c.tag == el.tag]
-            idx = siblings.index(el)
-            parts.append(f"{el.tag}[{idx}]")
-        else:
-            parts.append(el.tag)
-        el = parent
-    key = "/".join(reversed(parts))
-    return f"{key}@{attr}" if attr else key
-
-
-# ---------------------------------------------------------------------------
-# Backup
-# ---------------------------------------------------------------------------
-
-def backup(path: Path) -> Path:
-    bak = path.with_suffix(path.suffix + ".bak")
-    shutil.copy2(path, bak)
-    print(f"  [backup] {bak}")
-    return bak
-
-
-# ---------------------------------------------------------------------------
-# Editor
-# ---------------------------------------------------------------------------
 
 def open_in_editor(sql: str) -> str:
     editor = os.environ.get("EDITOR") or os.environ.get("VISUAL")
@@ -109,10 +56,6 @@ def open_in_editor(sql: str) -> str:
     return result
 
 
-# ---------------------------------------------------------------------------
-# XML helpers
-# ---------------------------------------------------------------------------
-
 def get_sql(entry: dict) -> str:
     node, attr = entry["nodes"][0]
     if attr:
@@ -120,25 +63,27 @@ def get_sql(entry: dict) -> str:
     return node.text or ""
 
 
-def set_sql(entry: dict, new_sql: str):
+def set_sql(entry: dict, new_sql: str) -> None:
     for node, attr in entry["nodes"]:
         if attr:
             node.set(attr, new_sql)
         else:
             node.text = new_sql
 
-# ---------------------------------------------------------------------------
-# Collect SQL entries — deduplicated by stable tree-path key
-# ---------------------------------------------------------------------------
 
 def collect_sql_entries(root: etree._Element) -> list:
-    groups: dict = {}  # key -> entry dict with list of (node, attr)
+    """Walk every <datasource>; group SQL by (kind, datasource, sql_text).
+
+    Tableau workbooks frequently repeat the same SQL across multiple
+    connection nodes. We surface one entry per unique SQL but track every
+    matching node so a single edit propagates to all of them.
+    """
+    groups: dict = {}
 
     def add(node, attr, kind, ds_name, **kwargs):
         sql = (node.get(attr, "") if attr else (node.text or "")).strip()
         if not sql:
             return
-        # Dedupe key: kind + datasource caption + SQL content
         key = (kind, ds_name, sql)
         if key in groups:
             groups[key]["nodes"].append((node, attr))
@@ -155,9 +100,9 @@ def collect_sql_entries(root: etree._Element) -> list:
         ds_name = ds.get("caption") or ds.get("name") or "<unnamed>"
 
         for conn in ds.iter("connection"):
-                    for attr_key in ("initial_sql", "initialsql", "one-time-sql"):
-                        if attr_key in conn.attrib:
-                            add(conn, attr_key, "initial_sql", ds_name)
+            for attr_key in ("initial_sql", "initialsql", "one-time-sql"):
+                if attr_key in conn.attrib:
+                    add(conn, attr_key, "initial_sql", ds_name)
 
         for node in ds.iter("initial_sql"):
             add(node, None, "initial_sql", ds_name)
@@ -170,26 +115,22 @@ def collect_sql_entries(root: etree._Element) -> list:
     return list(groups.values())
 
 
-# ---------------------------------------------------------------------------
-# Display
-# ---------------------------------------------------------------------------
-
-def print_entries(entries: list):
+def print_entries(entries: list) -> None:
     print()
     print(f"  {'#':<4}  {'Type':<14}  {'Datasource':<35}  Preview")
     print("  " + "-" * 95)
     for i, e in enumerate(entries, 1):
-        label   = "Initial SQL" if e["kind"] == "initial_sql" else "Custom SQL"
-        ds      = e["ds_name"][:34]
+        label = "Initial SQL" if e["kind"] == "initial_sql" else "Custom SQL"
+        ds = e["ds_name"][:34]
         preview = e["display_sql"].replace("\n", " ")[:58]
         print(f"  {i:<4}  {label:<14}  {ds:<35}  {preview}...")
     print()
 
 
-def print_full_sql(n: int, entry: dict):
+def print_full_sql(n: int, entry: dict) -> None:
     label = "Initial SQL" if entry["kind"] == "initial_sql" else "Custom SQL"
-    sql   = get_sql(entry)
-    bar   = "-" * 60
+    sql = get_sql(entry)
+    bar = "-" * 60
     print(f"\n  {bar}")
     print(f"  #{n}  {label}  |  {entry['ds_name']}")
     print(f"  {bar}")
@@ -197,32 +138,9 @@ def print_full_sql(n: int, entry: dict):
     print(f"  {bar}\n")
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def run(workbook_path: Path):
-    is_twbx = workbook_path.suffix.lower() == ".twbx"
-
-    if is_twbx:
-        with zipfile.ZipFile(workbook_path, "r") as zf:
-            twb_names = [n for n in zf.namelist() if n.endswith(".twb")]
-            if not twb_names:
-                sys.exit("  ERROR: No .twb found inside the .twbx archive.")
-            twb_name    = twb_names[0]
-            twb_bytes   = zf.read(twb_name)
-            other_files = {n: zf.read(n) for n in zf.namelist() if n != twb_name}
-    else:
-        twb_bytes   = workbook_path.read_bytes()
-        twb_name    = None
-        other_files = {}
-
-    try:
-        root = etree.fromstring(twb_bytes)
-    except etree.XMLSyntaxError as exc:
-        sys.exit(f"  ERROR: Could not parse XML — {exc}")
-
-    entries = collect_sql_entries(root)
+def run(workbook_path: Path) -> None:
+    wb = load_workbook(workbook_path)
+    entries = collect_sql_entries(wb.root)
 
     if not entries:
         print("\n  No Initial SQL or Custom SQL found in this workbook.\n")
@@ -232,7 +150,7 @@ def run(workbook_path: Path):
     print_entries(entries)
 
     modified = False
-    prompt   = "  Command (#=edit  show <#>=view full SQL  list  q): "
+    prompt = "  Command (#=edit  show <#>=view full SQL  list  q): "
 
     while True:
         raw = input(prompt).strip()
@@ -262,7 +180,7 @@ def run(workbook_path: Path):
         if raw.isdigit():
             n = int(raw)
             if 1 <= n <= len(entries):
-                entry       = entries[n - 1]
+                entry = entries[n - 1]
                 current_sql = get_sql(entry)
                 print(f"\n  Editing #{n}: {entry['kind']} — {entry['ds_name']}")
                 new_sql = open_in_editor(current_sql)
@@ -283,30 +201,16 @@ def run(workbook_path: Path):
         return
 
     backup(workbook_path)
-    new_bytes = etree.tostring(root, xml_declaration=True, encoding="UTF-8", pretty_print=False)
-
-    if is_twbx:
-        tmp = workbook_path.with_suffix(".twbx.tmp")
-        with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr(twb_name, new_bytes)
-            for name, data in other_files.items():
-                zf.writestr(name, data)
-        tmp.replace(workbook_path)
-    else:
-        workbook_path.write_bytes(new_bytes)
-
+    save_workbook(wb)
     print(f"\n  Saved to '{workbook_path}'\n")
 
 
-if __name__ == "__main__":
+def main() -> None:
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
+    run(validate_workbook_path(sys.argv[1]))
 
-    p = Path(sys.argv[1])
-    if not p.exists():
-        sys.exit(f"  ERROR: File not found — {p}")
-    if p.suffix.lower() not in (".twb", ".twbx"):
-        sys.exit("  ERROR: File must be a .twb or .twbx.")
 
-    run(p)
+if __name__ == "__main__":
+    main()
