@@ -12,6 +12,7 @@ import zipfile
 from lxml import etree
 
 _API_VERSION = "3.19"
+_TIMEOUT = 30  # seconds; applied to every urlopen call so a hung server can't wedge the CLI
 
 
 def _url(server: str, path: str) -> str:
@@ -34,7 +35,7 @@ def sign_in(server: str, site: str, pat_name: str, pat_secret: str) -> tuple[str
         headers={"Content-Type": "application/json", "Accept": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
             data = json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"Sign-in failed ({exc.code}): {exc.read().decode(errors='replace')}") from exc
@@ -50,7 +51,7 @@ def sign_out(server: str, token: str) -> None:
         headers={"X-Tableau-Auth": token},
     )
     try:
-        urllib.request.urlopen(req)
+        urllib.request.urlopen(req, timeout=_TIMEOUT)
     except Exception:
         pass  # best-effort
 
@@ -63,7 +64,7 @@ def find_datasource_id(server: str, token: str, site_id: str, name: str) -> str 
         headers={"X-Tableau-Auth": token, "Accept": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
             data = json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"Datasource lookup failed ({exc.code}): {exc.read().decode(errors='replace')}") from exc
@@ -78,7 +79,7 @@ def download_datasource_xml(server: str, token: str, site_id: str, ds_id: str) -
         headers={"X-Tableau-Auth": token},
     )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"Download failed ({exc.code}): {exc.read().decode(errors='replace')}") from exc

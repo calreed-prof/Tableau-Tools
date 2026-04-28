@@ -90,7 +90,11 @@ def backup(path: Path) -> Path:
 
 
 def load_env() -> dict[str, str]:
-    """Read key=value pairs from .env at the repo root. No external dependency."""
+    """Read key=value pairs from .env at the repo root. No external dependency.
+
+    Supports inline `#` comments after the value, and `'`/`"` quoted values
+    (any `#` inside the quotes is preserved).
+    """
     env_path = Path(__file__).parent.parent / ".env"
     result: dict[str, str] = {}
     if not env_path.exists():
@@ -100,7 +104,14 @@ def load_env() -> dict[str, str]:
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, _, v = line.partition("=")
-        result[k.strip()] = v.strip().strip("'").strip('"')
+        v = v.strip()
+        if v[:1] in ("'", '"'):
+            quote = v[0]
+            end = v.find(quote, 1)
+            v = v[1:end] if end != -1 else v[1:]
+        else:
+            v = v.split("#", 1)[0].strip()
+        result[k.strip()] = v
     return result
 
 

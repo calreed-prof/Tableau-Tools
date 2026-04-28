@@ -233,7 +233,8 @@ def _fetch_published_ds(entry: dict) -> etree._Element | None:
 
     site = entry.get("site") or env.get("TABLEAU_SITE", "")
 
-    print(f"\n  Connecting to {server} ...")
+    site_label = f"site '{site}'" if site else "default site"
+    print(f"\n  Connecting to {server} ({site_label}) ...")
     try:
         token, site_id = tableau_api.sign_in(server, site, pat_name, pat_secret)
     except RuntimeError as exc:
