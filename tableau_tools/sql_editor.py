@@ -21,7 +21,7 @@ from pathlib import Path
 
 from lxml import etree
 
-from .common import backup, load_workbook, save_workbook, validate_workbook_path
+from .common import backup, load_env, load_workbook, save_workbook, validate_workbook_path
 
 
 def open_in_editor(sql: str) -> str:
@@ -115,15 +115,45 @@ def collect_sql_entries(root: etree._Element) -> list:
     return list(groups.values())
 
 
+def collect_published_datasources(root: etree._Element) -> list:
+    """Find datasources backed by a published Tableau datasource (sqlproxy connection)."""
+    results = []
+    for ds in root.iter("datasource"):
+        for conn in ds.iter("connection"):
+            if conn.get("class") != "sqlproxy":
+                continue
+            ds_caption = ds.get("caption") or ds.get("name") or "<unnamed>"
+            dbname = conn.get("dbname", "").lstrip("/")
+            results.append({
+                "kind": "published_datasource",
+                "ds_name": ds_caption,
+                "published_name": dbname or ds_caption,
+                "server": conn.get("server", ""),
+                "site": conn.get("site", ""),
+                "display_sql": f"[Published on {conn.get('server', 'unknown server')}]",
+                "nodes": [],
+            })
+            break  # one sqlproxy per datasource
+    return results
+
+
+_KIND_LABEL = {
+    "initial_sql": "Initial SQL",
+    "custom_sql": "Custom SQL",
+    "published_datasource": "Published DS",
+}
+
+
 def print_entries(entries: list) -> None:
     print()
     print(f"  {'#':<4}  {'Type':<14}  {'Datasource':<35}  Preview")
     print("  " + "-" * 95)
     for i, e in enumerate(entries, 1):
-        label = "Initial SQL" if e["kind"] == "initial_sql" else "Custom SQL"
+        label = _KIND_LABEL.get(e["kind"], e["kind"])
         ds = e["ds_name"][:34]
         preview = e["display_sql"].replace("\n", " ")[:58]
-        print(f"  {i:<4}  {label:<14}  {ds:<35}  {preview}...")
+        suffix = "..." if e["kind"] != "published_datasource" else ""
+        print(f"  {i:<4}  {label:<14}  {ds:<35}  {preview}{suffix}")
     print()
 
 
@@ -138,22 +168,18 @@ def print_full_sql(n: int, entry: dict) -> None:
     print(f"  {bar}\n")
 
 
-def run(workbook_path: Path) -> None:
-    wb = load_workbook(workbook_path)
-    entries = collect_sql_entries(wb.root)
-
+def _browse_published_ds(ds_root: etree._Element, ds_name: str) -> None:
+    """View-only SQL browser for a downloaded published datasource."""
+    entries = collect_sql_entries(ds_root)
     if not entries:
-        print("\n  No Initial SQL or Custom SQL found in this workbook.\n")
+        print(f"\n  No SQL found in published datasource '{ds_name}'.\n")
         return
 
-    print(f"\n  Found {len(entries)} SQL block(s) in '{workbook_path.name}':")
+    print(f"\n  SQL in '{ds_name}' (view-only — changes are not saved back to Tableau Server):")
     print_entries(entries)
 
-    modified = False
-    prompt = "  Command (#=edit  show <#>=view full SQL  list  q): "
-
     while True:
-        raw = input(prompt).strip()
+        raw = input("  Command (#=open in editor  show <#>=print  list  q): ").strip()
         if not raw:
             continue
         low = raw.lower()
@@ -180,16 +206,118 @@ def run(workbook_path: Path) -> None:
         if raw.isdigit():
             n = int(raw)
             if 1 <= n <= len(entries):
-                entry = entries[n - 1]
-                current_sql = get_sql(entry)
-                print(f"\n  Editing #{n}: {entry['kind']} — {entry['ds_name']}")
-                new_sql = open_in_editor(current_sql)
-                if new_sql.strip() == current_sql.strip():
-                    print("  No changes detected.")
+                print(f"\n  Opening #{n} for viewing — edits will not be saved.\n")
+                open_in_editor(get_sql(entries[n - 1]))
+            else:
+                print(f"  Number must be between 1 and {len(entries)}.")
+            continue
+
+        print("  Unknown command. Try a number, 'show <#>', 'list', or 'q'.")
+
+
+def _fetch_published_ds(entry: dict) -> etree._Element | None:
+    """Sign in, download, and return the XML root for a published datasource."""
+    from . import tableau_api
+
+    env = load_env()
+    pat_name = env.get("TABLEAU_PAT_NAME")
+    pat_secret = env.get("TABLEAU_PAT")
+    if not pat_name or not pat_secret:
+        print("  ERROR: TABLEAU_PAT_NAME and TABLEAU_PAT must both be set in .env")
+        return None
+
+    server = env.get("TABLEAU_SERVER") or entry.get("server")
+    if not server:
+        print("  ERROR: TABLEAU_SERVER not set in .env and no server found in workbook.")
+        return None
+
+    site = entry.get("site") or env.get("TABLEAU_SITE", "")
+
+    print(f"\n  Connecting to {server} ...")
+    try:
+        token, site_id = tableau_api.sign_in(server, site, pat_name, pat_secret)
+    except RuntimeError as exc:
+        print(f"  ERROR: {exc}")
+        return None
+
+    try:
+        print(f"  Signed in. Looking up '{entry['published_name']}' ...")
+        ds_id = tableau_api.find_datasource_id(server, token, site_id, entry["published_name"])
+        if ds_id is None:
+            print(f"  ERROR: Datasource '{entry['published_name']}' not found on server.")
+            return None
+        print("  Downloading ...")
+        return tableau_api.download_datasource_xml(server, token, site_id, ds_id)
+    except RuntimeError as exc:
+        print(f"  ERROR: {exc}")
+        return None
+    finally:
+        tableau_api.sign_out(server, token)
+
+
+def run(workbook_path: Path) -> None:
+    wb = load_workbook(workbook_path)
+    sql_entries = collect_sql_entries(wb.root)
+    pub_entries = collect_published_datasources(wb.root)
+    entries = sql_entries + pub_entries
+
+    if not entries:
+        print("\n  No Initial SQL, Custom SQL, or published datasources found in this workbook.\n")
+        return
+
+    print(f"\n  Found {len(entries)} SQL block(s) in '{workbook_path.name}':")
+    print_entries(entries)
+
+    modified = False
+    prompt = "  Command (#=edit/view  show <#>=print full SQL  list  q): "
+
+    while True:
+        raw = input(prompt).strip()
+        if not raw:
+            continue
+        low = raw.lower()
+
+        if low in ("q", "quit", "exit"):
+            break
+
+        if low == "list":
+            print_entries(entries)
+            continue
+
+        if low.startswith("show"):
+            parts = low.split()
+            if len(parts) == 2 and parts[1].isdigit():
+                n = int(parts[1])
+                if 1 <= n <= len(entries):
+                    entry = entries[n - 1]
+                    if entry["kind"] == "published_datasource":
+                        print(f"  '{entry['ds_name']}' is a published datasource — select it by number to download and browse its SQL.")
+                    else:
+                        print_full_sql(n, entry)
                 else:
-                    set_sql(entry, new_sql)
-                    modified = True
-                    print("  Updated in memory.")
+                    print(f"  Number must be between 1 and {len(entries)}.")
+            else:
+                print("  Usage: show <#>   e.g. show 2")
+            continue
+
+        if raw.isdigit():
+            n = int(raw)
+            if 1 <= n <= len(entries):
+                entry = entries[n - 1]
+                if entry["kind"] == "published_datasource":
+                    ds_root = _fetch_published_ds(entry)
+                    if ds_root is not None:
+                        _browse_published_ds(ds_root, entry["published_name"])
+                else:
+                    current_sql = get_sql(entry)
+                    print(f"\n  Editing #{n}: {entry['kind']} — {entry['ds_name']}")
+                    new_sql = open_in_editor(current_sql)
+                    if new_sql.strip() == current_sql.strip():
+                        print("  No changes detected.")
+                    else:
+                        set_sql(entry, new_sql)
+                        modified = True
+                        print("  Updated in memory.")
             else:
                 print(f"  Number must be between 1 and {len(entries)}.")
             continue

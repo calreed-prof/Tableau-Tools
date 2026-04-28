@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import sys
 from pathlib import Path
 
@@ -66,6 +67,29 @@ def collect_calculated_fields(root: etree._Element) -> list[dict]:
     return results
 
 
+def _humanize_formulas(entries: list[dict]) -> None:
+    """Replace [Calculation_xyz] internal tokens in formulas with [Caption] names."""
+    name_map = {
+        e["internal_name"]: f'[{e["name"]}]'
+        for e in entries
+        if e["internal_name"] and e["internal_name"] != f'[{e["name"]}]'
+    }
+    if not name_map:
+        return
+
+    pattern = re.compile("|".join(re.escape(k) for k in name_map))
+
+    for e in entries:
+        formula = e["formula"]
+
+        def _replace(m: re.Match, _f: str = formula) -> str:
+            if m.end() < len(_f) and _f[m.end()] == ".":
+                return m.group(0)  # datasource qualifier — leave alone
+            return name_map[m.group(0)]
+
+        e["formula"] = pattern.sub(_replace, formula)
+
+
 def print_stdout(entries: list[dict]) -> None:
     if not entries:
         print("\n  No calculated fields found in this workbook.\n")
@@ -96,6 +120,7 @@ def write_csv(entries: list[dict], out_path: Path) -> None:
 def run(workbook_path: Path, fmt: str = "stdout", output: Path | None = None) -> None:
     wb = load_workbook(workbook_path)
     entries = collect_calculated_fields(wb.root)
+    _humanize_formulas(entries)
 
     if fmt == "csv":
         out = output or workbook_path.with_suffix(workbook_path.suffix + ".calcs.csv")
