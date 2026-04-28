@@ -1,3 +1,2 @@
 lxml>=4.9
-rich>=13.0
-questionary>=2.0
+textual[syntax]>=0.80

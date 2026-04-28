@@ -25,7 +25,7 @@ cd Tableau-Tools
 pip install -r requirements.txt
 ```
 
-Requires **Python 3.10+**. Dependencies: `lxml`, `rich`, `questionary`. The launcher also uses **tkinter** (stdlib) for the file picker — bundled with Windows/macOS Python; on Linux install `python3-tk` if needed.
+Requires **Python 3.10+**. Dependencies: `lxml`, `textual[syntax]` (the latter pulls tree-sitter grammars for in-app SQL highlighting). No native dialogs — the workbook picker is a Textual screen, so it works over SSH/WSL.
 
 ### Environment variables (optional)
 
@@ -47,20 +47,11 @@ These are only needed when a workbook connects to a **published datasource** on 
 ### Interactive launcher (recommended)
 
 ```bash
-python -m tableau_tools
+python -m tableau_tools                       # full TUI
+python -m tableau_tools path/to/Dashboard.twbx # TUI pre-loaded with this workbook
 ```
 
-```text
-╭─ Tableau Tools ──────────────────────────────────────────────╮
-│ Edit and inspect Tableau workbooks — press Ctrl+C to exit    │
-╰──────────────────────────────────────────────────────────────╯
-
-? Choose a tool: (Use arrow keys)
- ❯ Edit SQL           — Initial / Custom SQL
-   List calc fields   — name + formula
-```
-
-Arrow keys to pick a tool, then a native file picker opens filtered to `.twb` / `.twbx`. After the tool finishes you return to the menu. Press **Ctrl+C** to exit.
+The launcher is a [Textual](https://textual.textualize.io/) TUI: arrow keys to pick a tool, Enter to open it. The workbook picker is a built-in screen (no native dialogs), so it works fine over SSH or in WSL. Each tool screen exposes its own key bindings in the footer. Press **q** on the launcher to quit.
 
 ### Direct invocation
 
@@ -75,58 +66,23 @@ python -m tableau_tools.calculated_fields path/to/Dashboard.twbx --format csv --
 
 ## SQL editor
 
-Lists every Initial SQL and Custom SQL block in the workbook and lets you edit each one in your editor of choice (`$EDITOR` / `$VISUAL`, falling back to Notepad on Windows or nano elsewhere).
+Lists every Initial SQL and Custom SQL block in the workbook in a `DataTable`, with the selected entry's SQL shown in a syntax-highlighted `TextArea` below. Edit in place, press `s` to stage your changes, then `w` to write the workbook (a `.bak` copy is made automatically).
 
-When a datasource is backed by a **published datasource on Tableau Server** (rather than a direct database connection), it shows up in the list as a **Published DS** entry. Selecting it downloads the datasource via the REST API and opens a view-only SQL browser for its contents.
+When a datasource is backed by a **published datasource on Tableau Server**, it appears as a **Published DS** row. Press `d` to download it via the REST API and expand its SQL inline as additional read-only rows.
 
-### Sample session
+The legacy CLI (`python -m tableau_tools.sql_editor <file>`) still works headlessly and uses your `$EDITOR` / `$VISUAL` (Notepad on Windows, nano elsewhere) — useful for scripts.
 
-```text
-  Found 4 SQL block(s) in 'Sales_Dashboard.twbx':
+### Key bindings (SQL editor screen)
 
-  #     Type            Datasource                           Preview
-  -----------------------------------------------------------------------------------------------
-  1     Initial SQL     Snowflake - Prod                     SET QUERY_TAG = 'tableau_dashboar...
-  2     Custom SQL      Snowflake - Prod                     SELECT region, SUM(amount) AS rev...
-  3     Custom SQL      Snowflake - Sandbox                  SELECT * FROM staging.daily_orders...
-  4     Published DS    Sales Core                           [Published on tableau.company.com]
-
-  Command (#=edit/view  show <#>=print full SQL  list  q): 4
-
-  Connecting to tableau.company.com ...
-  Signed in. Looking up 'Sales Core' ...
-  Downloading ...
-
-  SQL in 'Sales Core' (view-only — changes are not saved back to Tableau Server):
-
-  #     Type            Datasource                           Preview
-  -----------------------------------------------------------------------------------------------
-  1     Custom SQL      Sales Core                           SELECT order_id, region, amount F...
-
-  Command (#=open in editor  show <#>=print  list  q): show 1
-  ...
-```
-
-### Commands (SQL editor)
-
-| Command      | What it does                                               |
-|--------------|------------------------------------------------------------|
-| `<#>`        | Open entry `#` in `$EDITOR` (or download + browse if Published DS) |
-| `show <#>`   | Print the full SQL for entry `#` in the terminal           |
-| `list`       | Re-print the index of SQL blocks                           |
-| `q`          | Quit (saves only if anything was edited)                   |
-
-### Choosing your editor
-
-Set `$EDITOR` (or `$VISUAL`) to whatever you prefer:
-
-```bash
-export EDITOR="code --wait"   # VS Code
-export EDITOR="vim"
-export EDITOR="subl -w"       # Sublime Text
-```
-
-On Windows without `$EDITOR` set, the script falls back to Notepad.
+| Key          | Action                                                                  |
+|--------------|-------------------------------------------------------------------------|
+| `↑` / `↓`    | Move between SQL entries — the TextArea below updates instantly         |
+| `e`          | Focus the TextArea to start editing                                     |
+| `s`          | Stage the current TextArea contents into the in-memory workbook         |
+| `w`          | Write the workbook to disk (creates `<file>.bak` first)                 |
+| `d`          | Download the selected Published DS row and expand its SQL inline        |
+| `r`          | Reload the workbook from disk (only when nothing is staged)             |
+| `Esc`        | Back to the launcher (warns if you have unsaved staged edits)           |
 
 ---
 
@@ -181,14 +137,23 @@ Columns: `name, internal_name, datasource, is_parameter, formula`.
 ```
 tableau_tools/
 ├── __init__.py
-├── __main__.py            # interactive launcher (loops until Ctrl+C)
-├── common.py              # workbook load/save/backup, .env loader
-├── sql_editor.py          # Initial SQL / Custom SQL / Published DS browser
-├── calculated_fields.py   # formula extractor with ID humanization
-└── tableau_api.py         # Tableau REST API client (sign-in, download)
+├── __main__.py                    # boots the Textual TUI
+├── common.py                      # workbook load/save/backup, .env loader
+├── sql_editor.py                  # SQL pure-logic + legacy CLI REPL
+├── calculated_fields.py           # formula extractor with ID humanization
+├── tableau_api.py                 # Tableau REST API client (sign-in, download)
+└── tui/
+    ├── app.py                     # TableauToolsApp + LauncherScreen
+    ├── tools.py                   # TOOLS registry
+    └── screens/
+        ├── workbook_picker.py     # ModalScreen[Path | None]
+        ├── sql_editor_screen.py   # SQL editor screen
+        └── calculated_fields_screen.py
+docs/
+└── adding_tools.md                # SOP for adding a new tool
 ```
 
-Each tool exposes both a `run(...)` function (used by the launcher) and a `main()` (argv parsing for `python -m tableau_tools.<tool>`).
+Each tool module exposes both a `run(...)` function and a `main()` (argv parsing for `python -m tableau_tools.<tool>`). The TUI screen for the same tool imports the module's pure-logic functions — no duplication. See [docs/adding_tools.md](docs/adding_tools.md) to add a new tool.
 
 ---
 

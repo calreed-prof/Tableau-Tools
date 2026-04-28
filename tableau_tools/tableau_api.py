@@ -8,6 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from typing import Callable
 
 from lxml import etree
 
@@ -72,15 +73,37 @@ def find_datasource_id(server: str, token: str, site_id: str, name: str) -> str 
     return items[0]["id"] if items else None
 
 
-def download_datasource_xml(server: str, token: str, site_id: str, ds_id: str) -> etree._Element:
-    """Download a published datasource and return its parsed XML root."""
+def download_datasource_xml(
+    server: str,
+    token: str,
+    site_id: str,
+    ds_id: str,
+    progress_cb: Callable[[int, int | None], None] | None = None,
+) -> etree._Element:
+    """Download a published datasource and return its parsed XML root.
+
+    progress_cb, if given, is called as progress_cb(downloaded_bytes, total_or_None)
+    after each chunk. Total may be None when the server omits Content-Length.
+    """
     req = urllib.request.Request(
         _url(server, f"sites/{site_id}/datasources/{ds_id}/content"),
         headers={"X-Tableau-Auth": token},
     )
     try:
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-            raw = resp.read()
+            total_header = resp.headers.get("Content-Length")
+            total = int(total_header) if total_header and total_header.isdigit() else None
+            chunks: list[bytes] = []
+            downloaded = 0
+            while True:
+                chunk = resp.read(64 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                downloaded += len(chunk)
+                if progress_cb is not None:
+                    progress_cb(downloaded, total)
+            raw = b"".join(chunks)
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"Download failed ({exc.code}): {exc.read().decode(errors='replace')}") from exc
 

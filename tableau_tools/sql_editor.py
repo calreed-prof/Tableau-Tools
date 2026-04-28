@@ -127,7 +127,8 @@ def collect_published_datasources(root: etree._Element) -> list:
             results.append({
                 "kind": "published_datasource",
                 "ds_name": ds_caption,
-                "published_name": dbname or ds_caption,
+                "published_name": ds_caption,
+                "published_dbname": dbname,
                 "server": conn.get("server", ""),
                 "site": conn.get("site", ""),
                 "display_sql": f"[Published on {conn.get('server', 'unknown server')}]",
@@ -148,12 +149,18 @@ def print_entries(entries: list) -> None:
     print()
     print(f"  {'#':<4}  {'Type':<14}  {'Datasource':<35}  Preview")
     print("  " + "-" * 95)
+    has_readonly = False
     for i, e in enumerate(entries, 1):
         label = _KIND_LABEL.get(e["kind"], e["kind"])
+        if e.get("read_only"):
+            label = f"{label}*"
+            has_readonly = True
         ds = e["ds_name"][:34]
-        preview = e["display_sql"].replace("\n", " ")[:58]
+        preview = " ".join(e["display_sql"].split())[:58]
         suffix = "..." if e["kind"] != "published_datasource" else ""
         print(f"  {i:<4}  {label:<14}  {ds:<35}  {preview}{suffix}")
+    if has_readonly:
+        print("  * = read-only (from published datasource; edits not saved)")
     print()
 
 
@@ -168,51 +175,13 @@ def print_full_sql(n: int, entry: dict) -> None:
     print(f"  {bar}\n")
 
 
-def _browse_published_ds(ds_root: etree._Element, ds_name: str) -> None:
-    """View-only SQL browser for a downloaded published datasource."""
-    entries = collect_sql_entries(ds_root)
-    if not entries:
-        print(f"\n  No SQL found in published datasource '{ds_name}'.\n")
-        return
-
-    print(f"\n  SQL in '{ds_name}' (view-only — changes are not saved back to Tableau Server):")
-    print_entries(entries)
-
-    while True:
-        raw = input("  Command (#=open in editor  show <#>=print  list  q): ").strip()
-        if not raw:
-            continue
-        low = raw.lower()
-
-        if low in ("q", "quit", "exit"):
-            break
-
-        if low == "list":
-            print_entries(entries)
-            continue
-
-        if low.startswith("show"):
-            parts = low.split()
-            if len(parts) == 2 and parts[1].isdigit():
-                n = int(parts[1])
-                if 1 <= n <= len(entries):
-                    print_full_sql(n, entries[n - 1])
-                else:
-                    print(f"  Number must be between 1 and {len(entries)}.")
-            else:
-                print("  Usage: show <#>   e.g. show 2")
-            continue
-
-        if raw.isdigit():
-            n = int(raw)
-            if 1 <= n <= len(entries):
-                print(f"\n  Opening #{n} for viewing — edits will not be saved.\n")
-                open_in_editor(get_sql(entries[n - 1]))
-            else:
-                print(f"  Number must be between 1 and {len(entries)}.")
-            continue
-
-        print("  Unknown command. Try a number, 'show <#>', 'list', or 'q'.")
+def _expand_published_ds(ds_root: etree._Element, published_name: str) -> list:
+    """Collect SQL entries from a downloaded published datasource and mark them read-only."""
+    sub_entries = collect_sql_entries(ds_root)
+    for sub in sub_entries:
+        sub["read_only"] = True
+        sub["ds_name"] = f"{published_name} / {sub['ds_name']}"
+    return sub_entries
 
 
 def _fetch_published_ds(entry: dict) -> etree._Element | None:
@@ -241,14 +210,35 @@ def _fetch_published_ds(entry: dict) -> etree._Element | None:
         print(f"  ERROR: {exc}")
         return None
 
+    candidates: list[str] = []
+    for name in (entry.get("published_name"), entry.get("published_dbname")):
+        if name and name not in candidates:
+            candidates.append(name)
+
     try:
-        print(f"  Signed in. Looking up '{entry['published_name']}' ...")
-        ds_id = tableau_api.find_datasource_id(server, token, site_id, entry["published_name"])
+        ds_id = None
+        tried: list[str] = []
+        for name in candidates:
+            print(f"  Signed in. Looking up '{name}' ...")
+            ds_id = tableau_api.find_datasource_id(server, token, site_id, name)
+            tried.append(name)
+            if ds_id is not None:
+                break
         if ds_id is None:
-            print(f"  ERROR: Datasource '{entry['published_name']}' not found on server.")
+            print(f"  ERROR: Datasource not found on server. Tried: {', '.join(repr(n) for n in tried)}")
             return None
-        print("  Downloading ...")
-        return tableau_api.download_datasource_xml(server, token, site_id, ds_id)
+        print("  Downloading ...", end="", flush=True)
+        last = [0]
+
+        def _tick(done: int, total: int | None) -> None:
+            if total and done - last[0] >= total // 20 or done == total:
+                print(".", end="", flush=True)
+                last[0] = done
+
+        try:
+            return tableau_api.download_datasource_xml(server, token, site_id, ds_id, progress_cb=_tick)
+        finally:
+            print()
     except RuntimeError as exc:
         print(f"  ERROR: {exc}")
         return None
@@ -292,7 +282,7 @@ def run(workbook_path: Path) -> None:
                 if 1 <= n <= len(entries):
                     entry = entries[n - 1]
                     if entry["kind"] == "published_datasource":
-                        print(f"  '{entry['ds_name']}' is a published datasource — select it by number to download and browse its SQL.")
+                        print(f"  '{entry['ds_name']}' is a published datasource — select it by number to download and expand its SQL inline.")
                     else:
                         print_full_sql(n, entry)
                 else:
@@ -308,7 +298,16 @@ def run(workbook_path: Path) -> None:
                 if entry["kind"] == "published_datasource":
                     ds_root = _fetch_published_ds(entry)
                     if ds_root is not None:
-                        _browse_published_ds(ds_root, entry["published_name"])
+                        sub_entries = _expand_published_ds(ds_root, entry["published_name"])
+                        entries[n - 1 : n] = sub_entries
+                        if sub_entries:
+                            print(f"\n  Loaded {len(sub_entries)} SQL block(s) from '{entry['published_name']}'.")
+                        else:
+                            print(f"\n  No SQL found in '{entry['published_name']}'.")
+                        print_entries(entries)
+                elif entry.get("read_only"):
+                    print(f"\n  Viewing #{n}: {entry['ds_name']} (read-only — edits will not be saved)\n")
+                    open_in_editor(get_sql(entry))
                 else:
                     current_sql = get_sql(entry)
                     print(f"\n  Editing #{n}: {entry['kind']} — {entry['ds_name']}")
