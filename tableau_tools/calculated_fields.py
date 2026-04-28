@@ -36,6 +36,11 @@ def collect_calculated_fields(root: etree._Element) -> list[dict]:
 
     Skips columns whose calculation has no formula (parameters fall here for
     some workbook versions — they carry a literal value, not a formula).
+
+    Each entry carries a `node` reference to the `<calculation>` element and a
+    `raw_formula` snapshot of the on-disk attribute. `_humanize_formulas`
+    rewrites `formula` for display; `raw_formula` is preserved so `set_formula`
+    can map captions back to internal ids before writing.
     """
     results: list[dict] = []
 
@@ -61,10 +66,51 @@ def collect_calculated_fields(root: etree._Element) -> list[dict]:
                     "datasource": ds_caption,
                     "is_parameter": is_parameters,
                     "formula": formula,
+                    "raw_formula": formula,
+                    "node": calc,
                 }
             )
 
     return results
+
+
+def set_formula(entries: list[dict], entry: dict, new_text: str) -> None:
+    """Write `new_text` (humanized form, as shown in the editor) back to XML.
+
+    Tableau Desktop normally stores formulas with internal calc ids
+    (`[Calculation_xyz]`). The display form uses captions, so before writing
+    we reverse the humanization: `[Caption]` → `[Calculation_xyz]` for every
+    calc whose caption is unique across the workbook. Ambiguous captions are
+    left literal — safer than guessing.
+    """
+    cap_counts: dict[str, int] = {}
+    for e in entries:
+        cap = f'[{e["name"]}]'
+        cap_counts[cap] = cap_counts.get(cap, 0) + 1
+
+    rev_map = {
+        f'[{e["name"]}]': e["internal_name"]
+        for e in entries
+        if e["internal_name"]
+        and e["internal_name"] != f'[{e["name"]}]'
+        and cap_counts[f'[{e["name"]}]'] == 1
+    }
+
+    if rev_map:
+        pattern = re.compile("|".join(re.escape(k) for k in rev_map))
+
+        def _replace(m: re.Match, _f: str = new_text) -> str:
+            if m.end() < len(_f) and _f[m.end()] == ".":
+                return m.group(0)
+            return rev_map[m.group(0)]
+
+        raw = pattern.sub(_replace, new_text)
+    else:
+        raw = new_text
+
+    entry["node"].set("formula", raw)
+    entry["raw_formula"] = raw
+    entry["formula"] = new_text
 
 
 def _humanize_formulas(entries: list[dict]) -> None:
@@ -111,6 +157,7 @@ def write_csv(entries: list[dict], out_path: Path) -> None:
         writer = csv.DictWriter(
             f,
             fieldnames=["name", "internal_name", "datasource", "is_parameter", "formula"],
+            extrasaction="ignore",
         )
         writer.writeheader()
         writer.writerows(entries)

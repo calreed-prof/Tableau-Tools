@@ -24,5 +24,5 @@ class ToolEntry(NamedTuple):
 
 TOOLS: list[ToolEntry] = [
     ToolEntry("Edit SQL",         "Initial / Custom SQL / Published DS",   SqlEditorScreen),
-    ToolEntry("List calc fields", "Calculated fields (export to CSV)",     CalculatedFieldsScreen),
+    ToolEntry("Edit calc fields", "Calculated fields (edit + CSV export)", CalculatedFieldsScreen),
 ]

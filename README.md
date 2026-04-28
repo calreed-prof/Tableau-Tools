@@ -13,7 +13,7 @@
 | Tool                  | What it does                                                                          |
 |-----------------------|---------------------------------------------------------------------------------------|
 | **SQL editor**        | List and edit every Initial SQL / Custom SQL block; browse SQL inside published datasources via the REST API |
-| **Calculated fields** | Extract every calculated field (name + formula) to stdout or CSV; internal IDs resolved to readable names |
+| **Calculated fields** | Browse and edit every calculated field's formula in the TUI (writes back with a `.bak`); export to stdout or CSV; internal IDs resolved to readable names |
 
 ---
 
@@ -88,7 +88,23 @@ The legacy CLI (`python -m tableau_tools.sql_editor <file>`) still works headles
 
 ## Calculated fields
 
-Read-only. Walks every `<datasource>` and emits one row per calculated field — display name, datasource, and formula. Internal Tableau IDs (e.g. `[Calculation_1234567890]`) in formulas are automatically resolved to their human-readable caption names so cross-field references are easy to follow. Parameters are included but flagged.
+Walks every `<datasource>` and lists one row per calculated field — display name, datasource, and formula. Internal Tableau IDs (e.g. `[Calculation_1234567890]`) in formulas are automatically resolved to their human-readable caption names so cross-field references are easy to follow. Parameters are included but flagged read-only.
+
+In the TUI, edit the formula in the syntax-highlighted `TextArea`, press `s` to stage, then `w` to write the workbook (a `.bak` is made first). On save, captions you typed (e.g. `[Profit Ratio]`) are mapped back to the workbook's internal calc ids so Tableau Desktop sees the same convention it produced. Captions that aren't unique across the workbook are left as-is.
+
+The headless CLI (`python -m tableau_tools.calculated_fields <file>`) remains read-only export — interactive editing is the TUI's job.
+
+### Key bindings (Calculated fields screen)
+
+| Key       | Action                                                      |
+|-----------|-------------------------------------------------------------|
+| `↑` / `↓` | Move between calc fields — the TextArea below updates       |
+| `e`       | Focus the TextArea to start editing                         |
+| `s`       | Stage the current formula into the in-memory workbook       |
+| `w`       | Write the workbook to disk (creates `<file>.bak` first)     |
+| `r`       | Reload from disk (only when nothing is staged)              |
+| `x`       | Export all calc fields to `<workbook>.calcs.csv`            |
+| `Esc`     | Back to the launcher (warns if you have unsaved staged edits) |
 
 ### Stdout
 
